@@ -137,7 +137,7 @@ class BNNGroupLayer(tf.keras.layers.Layer):
 
 #Bayesian Sparse Multi-Layer Perceptron
 class SNN(tf.keras.Model):
-    def __init__(self, model_type, reg_type, sigma, input_size, hidden_sizes, temperature, tau, joint, init_val):
+    def __init__(self, model_type, reg_type, sigma, input_size, output_size, hidden_sizes, temperature, tau, joint, init_val):
         """
         """
         super(SNN, self).__init__()
@@ -164,12 +164,18 @@ class SNN(tf.keras.Model):
             self.dist_n = tfp.distributions.Normal(loc = 0.0, scale = 1.0)
             self.mylayers.append(tf.keras.layers.Dense(1, use_bias=False, activation=None))
         else:
-            self.mylayers.append(tf.keras.layers.Dense(1, use_bias=True, activation=None))
+            #self.mylayers.append(tf.keras.layers.Dense(1, use_bias=True, activation=None))
+            self.mylayers.append(tf.keras.layers.Dense(output_size, use_bias=True, activation=None))
     """
     """
     def call(self, x, y, sample = True, nsample = 1):
-        y = tf.transpose(tf.reshape(tf.repeat(y, nsample), (y.shape[0], nsample)))
-        y = tf.reshape(y, (y.shape[0], y.shape[1], 1))
+        y_dim = y.shape
+        if len(y_dim) == 1:
+            y = tf.transpose(tf.reshape(tf.repeat(y, nsample), (y.shape[0], nsample)))
+            y = tf.reshape(y, (y.shape[0], y.shape[1], 1))
+        else:
+            y = tf.transpose(tf.reshape(tf.repeat(y, nsample, axis = 1), (-1,nsample)))
+            y = tf.reshape(y, (nsample, -1, y_dim[1]))
         kl = 0
         if sample:
             samples_gamma, w, tmp = self.bnn.call(sample, nsample)
@@ -265,7 +271,7 @@ def train_bnn(model, x, y, batch_size, learning_rate, sample, nsample, lamb, l1)
     for i in range(nbatch):
         temp_id = batch_size*i + np.array(range(batch_size))
         temp_x = x[np.min(temp_id):(np.max(temp_id)+1), :]
-        temp_y = y[np.min(temp_id):(np.max(temp_id)+1)]
+        temp_y = y[np.min(temp_id):(np.max(temp_id)+1),]
         #update fixed params
         if model.model_type == 'classification':
             with tf.GradientTape() as tape:

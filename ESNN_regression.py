@@ -9,8 +9,8 @@ from ESNN_layers import *
 import pickle
 
 #load example data
-X = np.loadtxt('data/X_reg.txt')
-Y = np.loadtxt('data/Y_reg.txt')
+X = np.loadtxt('data/ESNN_sim_X.txt')
+Y = np.loadtxt('data/ESNN_sim_Y.txt')
 X = X.astype('float32')
 Y = Y.astype('float32')
 sample_size = X.shape[0]
@@ -28,6 +28,11 @@ L = 10 #number of models
 nsample = 100 #number of samples used for approximate expectation in ELBO
 nepoch =50 #training epoch
 input_size = X.shape[1]
+if len(Y.shape) == 1:
+    output_size = 1
+else:
+    output_size = Y.shape[1]
+
 initial_size = X.shape[1]
 hidden_sizes = [5]# a list of numbers indicate hidden sizes
 lamb = 1.0 #weight parameter in loss function
@@ -35,7 +40,7 @@ batch_size = 50
 sigma = 0.0001
 temperature = 0.1 #for gumbel-softmax trick
 tau = 0.3 #for scale alpha in softmax
-mini_loss = np.mean(np.square(Y_test-np.mean(Y_test)))*1.0 #this is used as the threshold for purity
+mini_loss = np.mean(np.square(Y_test-np.mean(Y_test, axis = 0)))*1.0 #this is used as the threshold for purity
 l = 0
 iteration = 0
 max_iter = 15
@@ -43,7 +48,11 @@ max_iter = 15
 
 #run lasso for init
 from sklearn.linear_model import LassoCV
-clf = LassoCV(cv=5, random_state=0).fit(X_train_raw, Y_train_raw)
+from sklearn.linear_model import MultiTaskLassoCV
+if output_size == 1:
+    clf = LassoCV(cv=5, random_state=0).fit(X_train_raw, Y_train_raw)
+else:
+    clf = MultiTaskLassoCV(cv=5, random_state=0, max_iter = 2000).fit(X_train_raw, Y_train_raw)
 pred_train = clf.predict(X_train_raw)
 acc_train = np.mean((Y_train_raw - pred_train)**2)
 pred_test = clf.predict(X_test)
@@ -65,8 +74,10 @@ def get_pips(model, tau):
 ####################################NN
 ##initializations
 #if initialize with lasso coefficient
-
-init_val = np.transpose(abs(clf.coef_))
+if output_size == 1:
+    init_val = np.transpose(abs(clf.coef_))
+else:
+    init_val = np.mean(np.transpose(abs(clf.coef_)), axis = -1)
 init_val = init_val.astype('float32')
 init_val = np.reshape(init_val, (input_size, 1))
 init_vals = list()
@@ -76,7 +87,7 @@ for i in range(L):
     init_vals.append(tf.convert_to_tensor(temp_init_val))
 #model
 all_model = list()
-model = SNN(model_type, reg_type, sigma, input_size, hidden_sizes, temperature, tau, False, init_vals[0])
+model = SNN(model_type, reg_type, sigma, input_size, output_size, hidden_sizes, temperature, tau, False, init_vals[0])
 all_myloss = list()
 all_prbs = list()
 all_cs = list()
@@ -89,9 +100,15 @@ while l<L and iteration<= max_iter:
         shuffled_indices = tf.random.shuffle(all_indices)
         train_bnn(model, tf.gather(X_train_raw, shuffled_indices), tf.gather(Y_train_raw, shuffled_indices), batch_size, learning_rate, True, nsample, 0.00005, 10.0)#0.00005
         pred, nll, kl = model.call(X_train_raw, Y_train_raw, True, 100)
-        temp_train_acc = np.mean(tf.losses.MSE(pred[:,:,0], Y_train_raw))
+        if output_size == 1:
+            temp_train_acc = np.mean(tf.losses.MSE(pred[:,:,0], Y_train_raw))
+        else:
+            temp_train_acc = np.mean(tf.losses.MSE(pred, Y_train_raw))
         pred, temp_test_nll, kl = model.call(X_test, Y_test, True, 100)
-        temp_test_acc = np.mean(tf.losses.MSE(pred[:,:,0], Y_test))
+        if output_size == 1:
+            temp_test_acc = np.mean(tf.losses.MSE(pred[:,:,0], Y_test))
+        else:
+            temp_test_acc = np.mean(tf.losses.MSE(pred, Y_test))
         elbo = nll+kl
         myloss[epoch,0] = elbo
         myloss[epoch,1] = temp_train_acc
@@ -135,9 +152,15 @@ while l<L and iteration<= max_iter:
             all_prbs.append(temp_to_add)
         #derive residuals
         pred, nll, kl = model.call(X_train_raw, Y_train_raw, True, 100)
-        res_train = np.mean(pred[:,:,0], axis = 0) - Y_train_raw
+        if output_size == 1:
+            res_train = np.mean(pred[:,:,0], axis = 0) - Y_train_raw
+        else:
+            res_train = np.mean(pred, axis = 0) - Y_train_raw
         pred, temp_test_nll, kl = model.call(X_test, Y_test, True, 100)
-        res_test = np.mean(pred[:,:,0], axis = 0) - Y_test
+        if output_size == 1:
+            res_test = np.mean(pred[:,:,0], axis = 0) - Y_test
+        else:
+            res_test = np.mean(pred, axis = 0) - Y_test
         Y_train_raw = res_train
         Y_test = res_test
         #compute cs
@@ -171,7 +194,7 @@ while l<L and iteration<= max_iter:
         temp_init_val = tf.random.truncated_normal([input_size, 1], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32)
     else:
         temp_init_val = init_vals[0]
-    model = SNN(model_type, reg_type, sigma, input_size, hidden_sizes, temperature, tau, False, temp_init_val)
+    model = SNN(model_type, reg_type, sigma, input_size, output_size, hidden_sizes, temperature, tau, False, temp_init_val)
     iteration+=1
 
 
