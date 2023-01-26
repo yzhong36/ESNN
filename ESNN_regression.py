@@ -52,7 +52,7 @@ from sklearn.linear_model import MultiTaskLassoCV
 if output_size == 1:
     clf = LassoCV(cv=5, random_state=0).fit(X_train_raw, Y_train_raw)
 else:
-    clf = MultiTaskLassoCV(cv=5, random_state=0, max_iter = 2000).fit(X_train_raw, Y_train_raw)
+    clf = MultiTaskLassoCV(cv=5, random_state=0).fit(X_train_raw, Y_train_raw)
 pred_train = clf.predict(X_train_raw)
 acc_train = np.mean((Y_train_raw - pred_train)**2)
 pred_test = clf.predict(X_test)
