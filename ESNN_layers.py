@@ -65,7 +65,7 @@ def scaled_softmax(logits):
 #Bayesian Neural Network Layer
 class BNNGroupLayer(tf.keras.layers.Layer):
     #Initialization
-    def __init__(self, input_size, output_size, temperature, tau, init_val):
+    def __init__(self, input_size, output_size, n_output, cov_traits, temperature, tau, init_val):
         """
         """
         super(BNNGroupLayer, self).__init__()
@@ -73,6 +73,8 @@ class BNNGroupLayer(tf.keras.layers.Layer):
         self.input_size = input_size
         #Number of hidden neurons of the first layer
         self.output_size = output_size
+        #
+        self.n_output = n_output
         #
         self.tau = tau
         #
@@ -82,11 +84,45 @@ class BNNGroupLayer(tf.keras.layers.Layer):
         if len(init_val)>0:
             self.w_alpha = tf.Variable(initial_value= init_val)
         else:
-            self.w_alpha = tf.Variable(tf.random.truncated_normal([input_size, 1], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
-        #means of slab
-        self.w_mean = tf.Variable(tf.random.truncated_normal([input_size, output_size], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
-        #log sigma of slab
-        self.w_rho = tf.Variable(tf.random.truncated_normal([input_size, output_size], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
+            self.w_alpha = tf.Variable(tf.random.truncated_normal([input_size, self.n_output], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
+        if self.n_output > 1:
+            # cov matrix across traits by default (only for test)
+            #self.cov = np.repeat(cov_traits, 2*self.n_output).reshape(self.n_output, self.n_output)
+            #np.fill_diagonal(self.cov, 1)
+            #self.cov_decomp = np.linalg.cholesky(self.cov)
+            #self.cov = tf.convert_to_tensor(self.cov, dtype=tf.dtypes.float32)
+            #self.cov_decomp = tf.convert_to_tensor(self.cov_decomp, dtype=tf.dtypes.float32)
+
+            #means of slab
+            self.w_mean = tf.Variable(tf.random.truncated_normal([input_size, output_size, self.n_output], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
+            
+            if cov_traits is None:
+                print("sampling a cov matrix ...")
+                cov_sampler = tfp.distributions.WishartTriL(df=self.n_output+2, scale_tril=tf.eye(self.n_output),
+                                                            input_output_cholesky = True, allow_nan_stats = False)
+                #cov_traits = tf.linalg.inv(cov_sampler.sample(sample_shape = (input_size, output_size)))
+                cov_sampler_cho = cov_sampler.sample(sample_shape = (input_size, output_size))
+
+                #self.cov = tf.Variable(tf.transpose(tf.reshape(tf.repeat(tf.repeat(cov_traits,output_size),input_size),
+                #                              (cov_traits.shape[0],cov_traits.shape[1],output_size,input_size))))
+                #self.cov_decomp = tf.Variable(tf.transpose(tf.linalg.cholesky(cov_traits), perm=[0,1,3,2]))
+                self.cov_decomp = tf.Variable(tf.transpose(cov_sampler_cho, perm=[0,1,3,2]))
+
+            #log sigma of slab
+            else:
+                print("have a pre-defined cov matrix ...")
+                cov_traits = tf.convert_to_tensor(cov_traits, dtype=tf.dtypes.float32)
+                self.cov = tf.transpose(tf.reshape(tf.repeat(tf.repeat(cov_traits,output_size),input_size),
+                                                    (cov_traits.shape[0],cov_traits.shape[1],output_size,input_size)))
+                self.cov_decomp = tf.transpose(tf.linalg.cholesky(self.cov), perm=[0,1,3,2])
+                
+            #self.w_rho = tf.Variable(tf.random.truncated_normal([input_size, output_size, self.n_output, self.n_output], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
+
+        else:
+            #means of slab
+            self.w_mean = tf.Variable(tf.random.truncated_normal([input_size, output_size], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
+            #log sigma of slab
+            self.w_rho = tf.Variable(tf.random.truncated_normal([input_size, output_size], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32))
 
     def sample_gamma(self, logits, nsample = 1):
         #sample from gumbel
@@ -94,25 +130,81 @@ class BNNGroupLayer(tf.keras.layers.Layer):
         return samples_gamma
 
     def sample_w(self, nsample = 1):
-        #sample from posterior
-        #reparam for the slab
-        #derive sigma
-        w_sigma = tf.exp(self.w_rho)
-        #sample standard normal noise
-        eps = tf.random.normal((nsample, self.input_size, self.output_size), mean=0.0, stddev = 1.0)
-        #derive w using normal reparam trick
-        w = tf.add(self.w_mean, tf.multiply(w_sigma, eps))
-        #mask out
-        all_samples_gamma = self.sample_gamma(self.w_alpha[:,0]/self.tau, nsample)
-        mask = all_samples_gamma
-        mask = tf.reshape(tf.repeat(mask, self.output_size), (mask.shape[0], mask.shape[1], self.output_size))
-        w = tf.multiply(mask, w)
-        klw = self.kl_w(w_sigma)
-        prbs = scaled_softmax(self.w_alpha[:,0]/self.tau)
-        kl = tf.reduce_sum(self.kl_gamma(prbs))
-        tmp = tf.reshape(tf.repeat(prbs, self.output_size), (prbs.shape[0], self.output_size))
-        kl += tf.reduce_sum(klw*tmp)
+        if self.n_output > 1:
+            eps = tf.random.normal((nsample, self.input_size, self.output_size, self.n_output), mean=0.0, stddev = 1.0)
+            w = tf.add(self.w_mean, tf.squeeze(tf.matmul(eps[:,:,:,None,:], self.cov_decomp), axis = -2))
+            
+            #print("w_1_1 cov: ",np.cov(tf.transpose(w[:,0,0,:])))
+            #print("w_1_2 cov: ",np.cov(tf.transpose(w[:,0,1,:])))
+            #print("w_1_3 cov: ",np.cov(tf.transpose(w[:,0,2,:])))
+
+            #all_samples_gamma = self.sample_gamma(self.w_alpha[:,0]/self.tau, nsample)
+            map_gamma = lambda alpha: self.sample_gamma(alpha, nsample)
+            all_samples_gamma = tf.convert_to_tensor(tf.map_fn(map_gamma, tf.transpose(self.w_alpha)))
+            all_samples_gamma = tf.transpose(all_samples_gamma, perm = [1, 2, 0])
+            #print("all_samples_gamma: ",all_samples_gamma)
+
+            mask = all_samples_gamma
+            mask = tf.reshape(tf.repeat(mask, self.output_size, axis = 1), (mask.shape[0], mask.shape[1], self.output_size, mask.shape[2]))
+            #mask = tf.reshape(tf.repeat(mask, self.n_output), (mask.shape[0], mask.shape[1], mask.shape[2], self.n_output))
+            #print("mask: ",mask)
+            #print("w: before: ",w)
+
+            w = tf.multiply(mask, w)
+            #print("w after: ",w)
+            #klw = self.kl_mv_w(self.cov)
+            cov = tf.matmul(tf.transpose(self.cov_decomp,perm=[0,1,3,2]), tf.transpose(self.cov_decomp,perm=[0,1,2,3]))
+            #print("cov: ",cov)
+            klw = self.kl_mv_w(cov)
+            
+            #print("w_alpha shape: ", tf.shape(self.w_alpha))
+            prbs = tf.convert_to_tensor(tf.map_fn(scaled_softmax, tf.transpose(self.w_alpha/self.tau)))
+            #print("prbs shape: ",tf.shape(prbs))
+            kl = tf.convert_to_tensor(tf.map_fn(self.kl_gamma, prbs))
+            #print("kl shape before: ", tf.shape(kl))
+            kl = tf.reduce_sum(kl)
+            #print("kl shape after: ", tf.shape(kl))
+            
+            prbs = tf.transpose(prbs)
+            #print("after prbs shape: ",tf.shape(prbs))
+            #print(prbs)
+
+            #print("klw shape: ", tf.shape(klw))
+
+            tmp = tf.reshape(tf.repeat(prbs, self.output_size, axis = 0),(prbs.shape[0],self.output_size,prbs.shape[1]))
+            #print("after prbs shape: ",tf.shape(prbs))
+            #print(prbs)
+
+            tmp = tf.transpose(tmp, perm = [2,0,1])
+            #print("tmp: ", tmp)
+            #print("klw: ", klw)
+            kl += tf.reduce_sum(klw*tmp)
+
+        else:
+            #sample from posterior
+            #reparam for the slab
+            #derive sigma
+            w_sigma = tf.exp(self.w_rho)
+            #sample standard normal noise
+            eps = tf.random.normal((nsample, self.input_size, self.output_size), mean=0.0, stddev = 1.0)
+            #derive w using normal reparam trick
+            w = tf.add(self.w_mean, tf.multiply(w_sigma, eps))
+            #mask out
+            all_samples_gamma = self.sample_gamma(self.w_alpha[:,0]/self.tau, nsample)
+            mask = all_samples_gamma
+            mask = tf.reshape(tf.repeat(mask, self.output_size), (mask.shape[0], mask.shape[1], self.output_size))
+            w = tf.multiply(mask, w)
+            klw = self.kl_w(w_sigma)
+
+            prbs = scaled_softmax(self.w_alpha[:,0]/self.tau)
+            kl = tf.reduce_sum(self.kl_gamma(prbs))
+            tmp = tf.reshape(tf.repeat(prbs, self.output_size), (prbs.shape[0], self.output_size))
+            kl += tf.reduce_sum(klw*tmp)
+        
         return  all_samples_gamma, w, kl
+
+    def kl_mv_w(self, cov):
+        return 0.5*(tf.squeeze(tf.matmul(self.w_mean[:,:,None,:],self.w_mean[:,:,:,None])) + tf.linalg.trace(cov) - self.n_output - tf.linalg.logdet(cov))
 
     def kl_w(self, w_sigma):
         return 0.5*(w_sigma**2 + self.w_mean**2 - 1 - tf.math.log(w_sigma**2))
@@ -137,7 +229,7 @@ class BNNGroupLayer(tf.keras.layers.Layer):
 
 #Bayesian Sparse Multi-Layer Perceptron
 class SNN(tf.keras.Model):
-    def __init__(self, model_type, reg_type, sigma, input_size, hidden_sizes, temperature, tau, joint, init_val):
+    def __init__(self, model_type, reg_type, sigma, input_size, output_size, cov_traits, hidden_sizes, temperature, tau, joint, init_val):
         """
         """
         super(SNN, self).__init__()
@@ -151,13 +243,18 @@ class SNN(tf.keras.Model):
         self.input_size = input_size
         #list store number of hidden sizes
         self.hidden_sizes = hidden_sizes
+        #
+        self.output_size = output_size
         #Bayesian layer
-        self.bnn = BNNGroupLayer(self.input_size, self.hidden_sizes[0], temperature, tau, init_val)
+        self.bnn = BNNGroupLayer(self.input_size, self.hidden_sizes[0], output_size, cov_traits, temperature, tau, init_val)
         #
         self.joint = joint
         #bias for first hidden layer and later layers
         self.mylayers = list()
-        self.mylayers.append(tf.Variable(tf.random.truncated_normal([self.hidden_sizes[0]], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32)))
+        if self.output_size > 1:
+            self.mylayers.append(tf.Variable(tf.random.truncated_normal([self.output_size, self.hidden_sizes[0]], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32)))
+        else:
+            self.mylayers.append(tf.Variable(tf.random.truncated_normal([self.hidden_sizes[0]], mean=0.0, stddev=0.1, dtype=tf.dtypes.float32)))
         for i in range(1, len(self.hidden_sizes)):
             self.mylayers.append(tf.keras.layers.Dense(hidden_sizes[i], use_bias=True, activation=None))
         if self.model_type == 'classification':
@@ -168,15 +265,27 @@ class SNN(tf.keras.Model):
     """
     """
     def call(self, x, y, sample = True, nsample = 1):
-        y = tf.transpose(tf.reshape(tf.repeat(y, nsample), (y.shape[0], nsample)))
-        y = tf.reshape(y, (y.shape[0], y.shape[1], 1))
+        y_dim = y.shape
+        if len(y_dim) == 1:
+            y = tf.transpose(tf.reshape(tf.repeat(y, nsample), (y.shape[0], nsample)))
+            y = tf.reshape(y, (y.shape[0], y.shape[1], 1))
+        else:
+            y = tf.transpose(tf.reshape(tf.repeat(y, nsample, axis = 1), (-1,nsample)))
+            y = tf.reshape(y, (nsample, -1, y_dim[1]))
+
         kl = 0
         if sample:
             samples_gamma, w, tmp = self.bnn.call(sample, nsample)
             kl += tmp
         else:
             w = self.bnn.call(sample, nsample)
-        C = tf.matmul(x, w)
+        
+        if self.output_size > 1:
+            # x: N, J   w: NN, J, H1, D => NN, N, D, H1
+            C = tf.tensordot(x, w, axes = ([1],[1]))
+            C = tf.transpose(C, perm = [1,0,3,2])
+        else:
+            C = tf.matmul(x, w)
         x = C + self.mylayers[0]
         x = tf.nn.relu(x)
         for i in range(1, len(self.hidden_sizes)):
@@ -201,6 +310,8 @@ class SNN(tf.keras.Model):
             return logits, kl
         else:
             pred = self.mylayers[len(self.hidden_sizes)](x)
+            if self.output_size > 1:
+                pred = tf.squeeze(pred)
             if not self.joint:
                 # mse for likelihood
                 nll = tf.reduce_mean(tf.losses.MSE(y, pred))
@@ -265,7 +376,7 @@ def train_bnn(model, x, y, batch_size, learning_rate, sample, nsample, lamb, l1)
     for i in range(nbatch):
         temp_id = batch_size*i + np.array(range(batch_size))
         temp_x = x[np.min(temp_id):(np.max(temp_id)+1), :]
-        temp_y = y[np.min(temp_id):(np.max(temp_id)+1)]
+        temp_y = y[np.min(temp_id):(np.max(temp_id)+1),]
         #update fixed params
         if model.model_type == 'classification':
             with tf.GradientTape() as tape:
@@ -277,10 +388,10 @@ def train_bnn(model, x, y, batch_size, learning_rate, sample, nsample, lamb, l1)
                 pred, nll, kl = model.call(temp_x, temp_y, sample, nsample)
                 elbo = nll+kl*lamb
             gradients=tape.gradient(elbo, model.trainable_variables)
-        optimizer = tf.optimizers.Adam(lr = learning_rate*l1)
+        optimizer = tf.optimizers.Adam(learning_rate = learning_rate*l1)
         optimizer.apply_gradients(zip([gradients[0]], [model.trainable_variables[0]]))
-        optimizer = tf.optimizers.Adam(lr = learning_rate)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        optimizer = tf.optimizers.Adam(learning_rate = learning_rate)
+        optimizer.apply_gradients(zip(gradients[1:], model.trainable_variables[1:]))
 
 
 
