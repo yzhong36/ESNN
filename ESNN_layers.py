@@ -98,15 +98,15 @@ class BNNGroupLayer(tf.keras.layers.Layer):
             
             if cov_traits is None:
                 print("sampling a cov matrix ...")
-                cov_sampler = tfp.distributions.WishartTriL(df=self.n_output+2, scale_tril=tf.eye(self.n_output),
-                                                            input_output_cholesky = True, allow_nan_stats = False)
-                #cov_traits = tf.linalg.inv(cov_sampler.sample(sample_shape = (input_size, output_size)))
-                cov_sampler_cho = cov_sampler.sample(sample_shape = (input_size, output_size))
+                cov_sampler = tfp.distributions.WishartTriL(df=self.n_output+5, scale_tril=tf.eye(self.n_output),
+                                                            input_output_cholesky = False, allow_nan_stats = False)
+                cov_traits = tf.linalg.inv(cov_sampler.sample(sample_shape = (input_size, output_size)))
+                #cov_sampler_cho = cov_sampler.sample(sample_shape = (input_size, output_size))
 
                 #self.cov = tf.Variable(tf.transpose(tf.reshape(tf.repeat(tf.repeat(cov_traits,output_size),input_size),
                 #                              (cov_traits.shape[0],cov_traits.shape[1],output_size,input_size))))
-                #self.cov_decomp = tf.Variable(tf.transpose(tf.linalg.cholesky(cov_traits), perm=[0,1,3,2]))
-                self.cov_decomp = tf.Variable(tf.transpose(cov_sampler_cho, perm=[0,1,3,2]))
+                self.cov_decomp = tf.Variable(tf.transpose(tf.linalg.cholesky(cov_traits), perm=[0,1,3,2]))
+                #self.cov_decomp = tf.Variable(tf.transpose(cov_sampler_cho, perm=[0,1,3,2]))
 
             #log sigma of slab
             else:
@@ -133,14 +133,20 @@ class BNNGroupLayer(tf.keras.layers.Layer):
         if self.n_output > 1:
             eps = tf.random.normal((nsample, self.input_size, self.output_size, self.n_output), mean=0.0, stddev = 1.0)
             w = tf.add(self.w_mean, tf.squeeze(tf.matmul(eps[:,:,:,None,:], self.cov_decomp), axis = -2))
+
+            """ tmp_w = np.mean(w, axis = 0)
+            for i in range(self.n_output):
+                print("trait",i+1,": ")
+                print(tmp_w[163,0,i])
+                print(self.w_mean[163,0,i])
             
-            #print("w_1_1 cov: ",np.cov(tf.transpose(w[:,0,0,:])))
+            print("w_1_1 cov: ",np.cov(tf.transpose(w[:,163,0,:]))) """
             #print("w_1_2 cov: ",np.cov(tf.transpose(w[:,0,1,:])))
             #print("w_1_3 cov: ",np.cov(tf.transpose(w[:,0,2,:])))
 
             #all_samples_gamma = self.sample_gamma(self.w_alpha[:,0]/self.tau, nsample)
             map_gamma = lambda alpha: self.sample_gamma(alpha, nsample)
-            all_samples_gamma = tf.convert_to_tensor(tf.map_fn(map_gamma, tf.transpose(self.w_alpha)))
+            all_samples_gamma = tf.convert_to_tensor(tf.map_fn(map_gamma, tf.transpose(self.w_alpha/self.tau)))
             all_samples_gamma = tf.transpose(all_samples_gamma, perm = [1, 2, 0])
             #print("all_samples_gamma: ",all_samples_gamma)
 
